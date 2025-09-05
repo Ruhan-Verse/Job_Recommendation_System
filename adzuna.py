@@ -1,53 +1,69 @@
 import os
 import requests
-import pandas as pd
+import csv
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
-# Load credentials
+# Load env vars
 load_dotenv()
 APP_ID = os.getenv("ADZUNA_APP_ID")
 APP_KEY = os.getenv("ADZUNA_APP_KEY")
 
-BASE_URL = "https://api.adzuna.com/v1/api/jobs/in/search/1"
+BASE_URL = "https://api.adzuna.com/v1/api/jobs/in/search/{}"
+RESULTS_PER_PAGE = 50
+MAX_PAGES = 10   # adjust if needed
 
-categories = [
-    "software engineer", "data analyst", "marketing manager",
-    "graphic designer", "chef", "sales executive",
-    "sports coach", "finance analyst", "gaming", "film production"
-]
+# Time filter: last 7 days
+now = datetime.now(timezone.utc)
+time_cutoff = now - timedelta(days=7)
 
-cities = ["Bangalore", "Mumbai", "Delhi", "Hyderabad"]
-
-all_jobs = []
-
-for cat in categories:
-    for city in cities:
+def fetch_jobs():
+    all_jobs = []
+    for page in range(1, MAX_PAGES + 1):
+        url = BASE_URL.format(page)
         params = {
             "app_id": APP_ID,
             "app_key": APP_KEY,
-            "results_per_page": 10,
-            "what": cat,
-            "where": city
+            "results_per_page": RESULTS_PER_PAGE,
+            "sort_by": "date",   # ensures newest jobs come first
         }
-        try:
-            response = requests.get(BASE_URL, params=params)
-            response.raise_for_status()
-            data = response.json()
-            jobs = data.get("results", [])
+        resp = requests.get(url, params=params)
+        if resp.status_code != 200:
+            print(f"Error {resp.status_code} on page {page}")
+            break
 
-            if jobs:
-                all_jobs.extend(jobs)
-                print(f"✅ Found {len(jobs)} jobs for '{cat}' in {city}")
-            else:
-                print(f"⚠️ No jobs for '{cat}' in {city}")
+        data = resp.json()
+        jobs = data.get("results", [])
+        if not jobs:
+            break
 
-        except Exception as e:
-            print(f"❌ Error for {cat} in {city}: {e}")
+        for job in jobs:
+            created = datetime.fromisoformat(job["created"].replace("Z", "+00:00"))
+            if created >= time_cutoff:   # only last 7 days
+                all_jobs.append({
+                    "title": job.get("title"),
+                    "company": job.get("company", {}).get("display_name"),
+                    "location": job.get("location", {}).get("display_name"),
+                    "created": created.strftime("%Y-%m-%d %H:%M"),
+                    "category": job.get("category", {}).get("label"),
+                    "salary_min": job.get("salary_min"),
+                    "salary_max": job.get("salary_max"),
+                    "redirect_url": job.get("redirect_url"),
+                })
 
-# Save results
-if all_jobs:
-    df = pd.DataFrame(all_jobs)
-    df.to_csv("adzuna_india_jobs.csv", index=False, encoding="utf-8")
-    print(f"\n🎉 Saved {len(df)} jobs into adzuna_india_jobs.csv")
-else:
-    print("⚠️ Still no jobs found at all.")
+    return all_jobs
+
+def save_to_csv(jobs, filename="adzuna_jobs_7days.csv"):
+    if not jobs:
+        print("⚠️ No jobs found in the last 7 days.")
+        return
+
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=jobs[0].keys())
+        writer.writeheader()
+        writer.writerows(jobs)
+    print(f"✅ Saved {len(jobs)} jobs to {filename}")
+
+if __name__ == "__main__":
+    jobs = fetch_jobs()
+    save_to_csv(jobs)
